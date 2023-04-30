@@ -1,0 +1,14 @@
+.vscode
+
+inputs
+outputs
+
+lex.yy.cpp
+micro.tab.cpp
+micro.tab.hpp
+compiler
+
+tiny
+a.out
+our.txt
+expected.txt

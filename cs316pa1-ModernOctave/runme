@@ -1,0 +1,3 @@
+#!/bin/sh
+
+./scanner $1 $2

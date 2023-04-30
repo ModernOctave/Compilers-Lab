@@ -1,0 +1,983 @@
+%{
+	#include <iostream>
+	#include <list>
+	#include <stack>
+	#include <string>
+	#include <unordered_map>
+
+	using namespace std;
+
+	extern FILE* yyin;
+	extern FILE* yyout;
+
+	int yylex();
+	void yyerror(const char* msg);
+	
+	struct Entry {
+		string name;
+		string type;
+		string value;
+		string line;
+	};
+
+	struct Value {
+		string type;
+		string value;
+	};
+
+	struct ArithNode {
+		string op;
+		string type;
+		string value;
+	};
+
+	int temp = 0;
+
+	class LabelControl {
+		int numLabels = 0;
+		stack<int> labelStack;
+		stack<int> loopStack;
+
+		public:
+		
+		int getCurrentLabel() {
+			return labelStack.top();
+		}
+
+		int getCurrentLoopLabel() {
+			return loopStack.top();
+		}
+
+		void createLabel() {
+			labelStack.push(numLabels);
+			numLabels++;
+		}
+
+		void createLoopLabel() {
+			labelStack.push(numLabels);
+			loopStack.push(numLabels);
+			numLabels++;
+		}
+
+		void exitLabel() {
+			labelStack.pop();
+		}
+
+		void exitLoopLabel() {
+			labelStack.pop();
+			loopStack.pop();
+		}
+	};
+
+	class SymbolTable {
+		unordered_map<string, unordered_map<string, struct Entry> *> entryTables;
+		unordered_map<string, list<string> *> scopeVars;
+		stack<string> scopeStack;
+		list<string> scopeList;
+		int numBlocks = 1;
+
+		public:
+
+		void createScope() {
+			string scopeName = "BLOCK" + to_string(numBlocks);
+			unordered_map<string, struct Entry> *newScope = new unordered_map<string, struct Entry>();
+			entryTables[scopeName] = newScope;
+			list<string> *newScopeVars = new list<string>();
+			scopeVars[scopeName] = newScopeVars;
+			scopeStack.push(scopeName);
+			scopeList.push_back(scopeName);
+			numBlocks++;
+		}
+
+		void createScope(string scopeName) {
+			unordered_map<string, struct Entry> *newScope = new unordered_map<string, struct Entry>();
+			entryTables[scopeName] = newScope;
+			list<string> *newScopeVars = new list<string>();
+			scopeVars[scopeName] = newScopeVars;
+			scopeStack.push(scopeName);
+			scopeList.push_back(scopeName);
+		}
+
+		void exitScope() {
+			scopeStack.pop();
+		}
+
+		void checkIfDeclared(string varName) {
+			unordered_map<string, struct Entry> *currentScope = entryTables[scopeStack.top()];
+			if (currentScope->find(varName) != currentScope->end()) {
+				// string msg = "DECLARATION ERROR " + varName + " (previous declaration was at line "+to_string(currentScope->)+")\n";
+				string msg = "DECLARATION ERROR " + varName + " (previous declaration was at line "+currentScope->at(varName).line+")\n";
+				yyerror(msg.c_str());
+			}
+		}
+
+		// Add an entry to the symbol table
+		void addEntry(string varName, string varType, int line) {
+			unordered_map<string, struct Entry> *currentScope = entryTables[scopeStack.top()];
+			struct Entry newEntry;
+			newEntry.type = varType;
+			newEntry.line = to_string(line);
+			newEntry.name = varName;
+			(*currentScope)[varName] = newEntry;
+			scopeVars[scopeStack.top()]->push_back(varName);
+		}
+
+		// Add an entry to the symbol table with a value
+		void addEntry(string varName, string varType, int line, string varValue) {
+			unordered_map<string, struct Entry> *currentScope = entryTables[scopeStack.top()];
+			struct Entry newEntry;
+			newEntry.type = varType;
+			newEntry.line = to_string(line);
+			newEntry.value = varValue;
+			newEntry.name = varName;
+			(*currentScope)[varName] = newEntry;
+			scopeVars[scopeStack.top()]->push_back(varName);
+		}
+		
+		// Search for the variable in the current scope and all the parent scopes and return the entry
+		struct Entry *getEntry(string varName) {
+			stack<string> tempStack = scopeStack;
+			while (!tempStack.empty()) {
+				unordered_map<string, struct Entry> *currentScope = entryTables[tempStack.top()];
+				if (currentScope->find(varName) != currentScope->end()) {
+					return &currentScope->at(varName);
+				}
+				tempStack.pop();
+			}
+			yyerror("ERROR (getEntry): Variable not found in symbol table\n");
+			return NULL;
+		}
+
+		const char *getCurrentScope() {
+			return scopeStack.top().c_str();
+		}
+
+		const char *findWhichScope(string varName) {
+			stack<string> tempStack = scopeStack;
+			while (!tempStack.empty()) {
+				unordered_map<string, struct Entry> *currentScope = entryTables[tempStack.top()];
+				if (currentScope->find(varName) != currentScope->end()) {
+					return tempStack.top().c_str();
+				}
+				tempStack.pop();
+			}
+			yyerror("ERROR (findWhichScope): Variable not found in symbol table\n");
+			return NULL;
+		}
+
+		bool isFromGlobal(string varName) {
+			stack<string> tempStack = scopeStack;
+			while (!tempStack.empty()) {
+				unordered_map<string, struct Entry> *currentScope = entryTables[tempStack.top()];
+				if (currentScope->find(varName) != currentScope->end()) {
+					if (tempStack.top() == "GLOBAL") {
+						return true;
+					}
+					else {
+						return false;
+					}
+				}
+				tempStack.pop();
+			}
+			yyerror("ERROR (isFromGlobal): Variable not found in symbol table\n");
+			return NULL;
+		}
+
+		bool isGlobal() {
+			return (scopeStack.top() == "GLOBAL");
+		}
+
+		stack<string> getSearchStack() {
+			stack<string> tempStack = scopeStack;
+			stack<string> searchStack;
+			searchStack.push(tempStack.top());
+			tempStack.pop();
+			while (string("BLOCK").compare(searchStack.top().substr(0, 5)) == 0) {
+				searchStack.push(tempStack.top());
+				tempStack.pop();
+			}
+			return searchStack;
+		}
+
+		int getNumEntries() {
+			stack<string> searchStack = getSearchStack();
+			int num = 0;
+			while (!searchStack.empty()) {
+				num += entryTables[searchStack.top()]->size();
+				searchStack.pop();
+			}
+			return num;
+		}
+
+		int getNumLocalEntries() {
+			return entryTables[scopeStack.top()]->size();
+		}
+
+		int getVarNum(string varName) {
+			stack<string> searchStack = getSearchStack();
+			int num = 0;
+			while (!searchStack.empty()) {
+				for (auto it = scopeVars[searchStack.top()]->begin(); it != scopeVars[searchStack.top()]->end(); it++) {
+					if (*it == varName) {
+						return num;
+					}
+					num++;
+				}
+				searchStack.pop();
+			}
+			yyerror("ERROR (getVarNum): Variable not found in symbol table\n");
+			return -1;
+		}
+
+		// Print the symbol table
+		void printSymbolTables() {
+			bool first = true;
+			fprintf(yyout, "\n------------------------------------\n");
+			for (string scopeName : scopeList) {
+				if (first) {
+					first = false;
+				}
+				else {
+					fprintf(yyout, "\n");
+				}
+				fprintf(yyout, "Symbol table %s\n", scopeName.c_str());
+				unordered_map<string, struct Entry> *scope = entryTables[scopeName];
+				for (auto it = scopeVars[scopeName]->begin(); it != scopeVars[scopeName]->end(); it++) {
+					if (scope->at(*it).value != "") {
+						fprintf(yyout, "name %s type %s value \"%s\"\n", it->c_str(), scope->at(*it).type.c_str(), scope->at(*it).value.c_str());
+					}
+					else {
+						fprintf(yyout, "name %s type %s\n", it->c_str(), scope->at(*it).type.c_str());
+					}
+				}
+			}
+			fprintf(yyout, "\n------------------------------------\n\n");
+		}
+	}; 
+
+
+	SymbolTable st;
+	LabelControl lc;
+	stack<string> funcStack;
+	stack<int> numParamsStack;
+	stack<int> numArgsStack;
+	string type, IOOp, op, compop;
+	bool isGlobal = false;
+
+	int getOffset(string varName) {
+		int offset;
+		if (st.getVarNum(varName) >= numParamsStack.top()) {
+			// Local variable
+			offset = - 1 - (st.getVarNum(varName) - numParamsStack.top());
+		}
+		else {
+			// Parameter
+			offset = 2 + (st.getVarNum(varName));
+		}
+		return offset;
+	}
+%}
+
+%union {
+	std::pair<std::string, int> *strLine;
+	struct Entry *entry;
+	char *str;
+	struct Value *value;
+	struct ArithNode *arithNode;
+}
+
+%token PROGRAM _BEGIN END FUNCTION READ WRITE IF ELSE ENDIF WHILE ENDWHILE CONTINUE BREAK RETURN INT VOID STRING FLOAT
+%token DEF ADD MINUS MULT DIV EQ NEQ LT GT OB CB COLON COMMA LEQ GEQ
+%token IDENTIFIER INTLITERAL FLOATLITERAL STRINGLITERAL
+
+%type <strLine> IDENTIFIER id STRINGLITERAL str INTLITERAL FLOATLITERAL
+%type <value> primary expr postfix_expr factor call_expr
+%type <arithNode> factor_prefix expr_prefix
+%type <str> addop mulop
+
+%%
+
+program: PROGRAM id _BEGIN
+	{
+		// Create the global scope
+		st.createScope("GLOBAL");
+	}
+	pgm_body END
+	{
+		// Exit the global scope
+		st.exitScope();
+		// Print the symbol tables
+		// st.printSymbolTables();
+	}
+	;
+id: IDENTIFIER
+	{
+		$$ = $1;
+	}
+	;
+pgm_body: decl 
+	{
+		// Generate sun assembly code for pushing space for return value
+		fprintf(yyout, "push\n");
+
+		// Generate sun assembly code for calling function
+		fprintf(yyout, "jsr main\n");	
+
+		// Generate sun assembly code for system halt
+		fprintf(yyout, "sys halt\n");
+	}
+	func_declarations
+	;
+decl: string_decl decl
+	| var_decl decl
+	| %empty
+	;
+
+string_decl: STRING id DEF str COLON
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($2->first);
+		// Add the variable to the current scope
+		// Remove the quotes from the string
+		$4->first = $4->first.substr(1, $4->first.length() - 2);
+		st.addEntry($2->first, "STRING", $2->second, $4->first);
+
+		// Generate sun assembly code
+		fprintf(yyout, "str %s-%s \"%s\"\n", st.getCurrentScope(), $2->first.c_str(), $4->first.c_str());
+	}
+	;
+str: STRINGLITERAL
+	;
+
+var_decl: var_type id_list_decl COLON
+	;
+var_type: FLOAT
+	{
+		type = "FLOAT";
+	}
+	| INT
+	{
+		type = "INT";
+	}
+	;
+any_type: var_type 
+	| VOID
+	;
+id_list_decl: id
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($1->first);
+		// Add the variable to the current scope
+		st.addEntry($1->first, type, $1->second);
+
+		if (st.isGlobal()) {
+			// Generate sun assembly code
+			fprintf(yyout, "var %s\n", $1->first.c_str());
+		}
+	}
+	id_tail_decl
+id_tail_decl: COMMA id
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($2->first);
+		// Add the variable to the current scope
+		st.addEntry($2->first, type, $2->second);
+
+		if (st.isGlobal()) {
+			// Generate sun assembly code
+			fprintf(yyout, "var %s\n", $2->first.c_str());
+		}
+	} 
+	id_tail_decl
+	| %empty
+	;
+id_list: id 
+	{
+		string loc;
+		if (st.isFromGlobal($1->first)) {
+			loc = $1->first;
+		}
+		else {
+			loc = "$" + to_string(getOffset($1->first));
+		}
+		// Generate sun assembly code
+		struct Entry *entry = st.getEntry($1->first);
+		if (entry->type == "INT") {
+			fprintf(yyout, "sys %si %s\n", IOOp.c_str(), loc.c_str());
+		}
+		else if (entry->type == "FLOAT") {
+			fprintf(yyout, "sys %sr %s\n", IOOp.c_str(), loc.c_str());
+		}
+		else if (entry->type == "STRING") {
+			fprintf(yyout, "sys %ss %s-%s\n", IOOp.c_str(), st.findWhichScope($1->first), $1->first.c_str());
+		}
+	}
+	id_tail
+id_tail: COMMA id 
+	{
+		string loc;
+		if (st.isFromGlobal($2->first)) {
+			loc = $2->first;
+		}
+		else {
+			loc = "$" + to_string(getOffset($2->first));
+		}
+		// Generate sun assembly code
+		struct Entry *entry = st.getEntry($2->first);
+		if (entry->type == "INT") {
+			fprintf(yyout, "sys %si %s\n", IOOp.c_str(), loc.c_str());
+		}
+		else if (entry->type == "FLOAT") {
+			fprintf(yyout, "sys %sr %s\n", IOOp.c_str(), loc.c_str());
+		}
+		else if (entry->type == "STRING") {
+			fprintf(yyout, "sys %ss %s-%s\n", IOOp.c_str(), st.findWhichScope($2->first), $2->first.c_str());
+		}
+	}
+	id_tail
+	| %empty
+	;
+
+param_decl_list: param_decl param_decl_tail
+	| %empty
+	;
+param_decl: var_type id
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($2->first);
+		// Add the variable to the current scope
+		st.addEntry($2->first, type, $2->second);
+	}
+	;
+param_decl_tail: COMMA param_decl param_decl_tail
+	| %empty
+	;
+
+func_declarations: func_decl func_declarations
+	| %empty
+	;
+func_decl: FUNCTION any_type id
+	{
+		// Create a new scope for the function
+		st.createScope($3->first);
+
+		// Generate sun assembly code for function label
+		fprintf(yyout, "label %s\n", $3->first.c_str());
+	}
+	OB param_decl_list CB 
+	{
+		numParamsStack.push(st.getNumEntries());
+	}
+	_BEGIN func_body END
+	{
+		numParamsStack.pop();
+		// Exit the function scope
+		st.exitScope();
+	}
+	;
+func_body: decl 
+	{
+		// Generate sun assembly code for allocating space for local variables
+		fprintf(yyout, "link %d\n", st.getNumEntries()-numParamsStack.top());
+	}
+	stmt_list
+	;
+
+stmt_list: stmt stmt_list 
+	| %empty
+	;
+stmt: base_stmt 
+	| if_stmt
+	| while_stmt
+	;
+base_stmt: assign_stmt 
+	| read_stmt 
+	| write_stmt 
+	| return_stmt
+	;
+
+assign_stmt: assign_expr COLON
+	;
+assign_expr: id DEF expr
+	{
+		if (st.isFromGlobal($1->first)) {
+			// Generate sun assembly code
+			fprintf(yyout, "move %s %s\n", $3->value.c_str(), $1->first.c_str());
+		}
+		else {
+			// Generate sun assembly code
+			fprintf(yyout, "move %s $%d\n", $3->value.c_str(), getOffset($1->first));
+		}
+	}
+	;
+read_stmt: READ 
+	{
+		IOOp = "read";
+	}
+	OB id_list CB COLON
+	;
+write_stmt: WRITE 
+	{
+		IOOp = "write";
+	}
+	OB id_list CB COLON
+	;
+return_stmt: RETURN expr COLON
+	{
+		// Generate sun assembly code for returning value from function
+		fprintf(yyout, "move %s $%d\n", $2->value.c_str(), numParamsStack.top()+2);
+
+		// Generate sun assembly code for unallocating space for local variables
+		fprintf(yyout, "unlnk\n");
+
+		// Generate sun assembly code for returning
+		fprintf(yyout, "ret\n");
+	}
+	;
+
+expr: expr_prefix factor
+	{
+		// Create value
+		$$ = new Value();
+
+		if ($1 != NULL) {
+			// Generate sun assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+	}
+	;
+expr_prefix: expr_prefix factor addop
+	{
+		// Create arithnode
+		$$ = new ArithNode();
+		$$->op = $3;
+
+		if ($1 != NULL) {
+			// Generate sun assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+
+	}
+	| %empty
+	{
+		$$ = NULL;
+	}
+	;
+factor: factor_prefix postfix_expr
+	{
+		// Create value
+		$$ = new Value();
+
+		if ($1 != NULL) {
+			// Generate sun assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+	}
+	;
+factor_prefix: factor_prefix postfix_expr mulop
+	{
+		// Create arithnode
+		$$ = new ArithNode();
+		$$->op = $3;
+
+		if ($1 != NULL) {
+			// Generate sun assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+	}
+	| %empty
+	{
+		$$ = NULL;
+	}
+	;
+postfix_expr: primary
+	{
+		$$ = $1;
+	}
+	| call_expr
+	{
+		
+	}
+	;
+call_expr: id 
+	{
+		funcStack.push($1->first);
+		numArgsStack.push(0);
+		// Generate sun assembly code for pushing space for return value
+		fprintf(yyout, "push\n");
+	}
+	OB expr_list CB
+	{
+		// Generate sun assembly code for calling function
+		fprintf(yyout, "jsr %s\n", funcStack.top().c_str());	
+
+		// Generate sun assembly code for popping arguments
+		for (int i = 0; i < numArgsStack.top(); i++) {
+			fprintf(yyout, "pop\n");
+		}
+
+		// Generate sun assembly code for popping return value
+		fprintf(yyout, "pop r%d\n", temp);
+
+		$$ = new Value();
+		$$->type = "FLOAT";
+		$$->value = "r" + to_string(temp);
+		temp++;
+
+		numArgsStack.pop();
+		funcStack.pop();
+	}
+	;
+expr_list: expr expr_list_tail
+	{
+		numArgsStack.top()++;
+		// Generate sun assembly code for pushing argument
+		fprintf(yyout, "push %s\n", $1->value.c_str());
+	}
+	| %empty
+	;
+expr_list_tail: COMMA expr 
+	{
+		numArgsStack.top()++;
+		// Generate sun assembly code for pushing argument
+		fprintf(yyout, "push %s\n", $2->value.c_str());
+	}
+	expr_list_tail
+	| %empty
+	;
+primary: OB expr CB
+	{
+		$$ = $2;
+	}
+	| id
+	{
+		// Generate sun assembly code for moving value into register
+		if (st.isFromGlobal($1->first)) {
+			fprintf(yyout, "move %s r%d\n", $1->first.c_str(), temp);
+		}
+		else {
+			fprintf(yyout, "move $%d r%d\n", getOffset($1->first), temp);
+		}
+
+		struct Entry *entry = st.getEntry($1->first);
+		$$ = new Value();
+		$$->type = entry->type;
+		$$->value = string("r") + to_string(temp);
+		temp++;
+	}
+	| INTLITERAL
+	{
+		// Generate sun assembly code for moving into register
+		fprintf(yyout, "move %s r%d\n", $1->first.c_str(), temp);
+
+		$$ = new Value();
+		$$->type = string("INT");
+		$$->value = string("r") + to_string(temp);
+		temp++;
+	}
+	| FLOATLITERAL
+	{
+		// Generate sun assembly code for moving into register
+		fprintf(yyout, "move %s r%d\n", $1->first.c_str(), temp);
+
+		$$ = new Value();
+		$$->type = string("FLOAT");
+		$$->value = string("r") + to_string(temp);
+		temp++;
+	}
+	;
+addop: ADD 
+	{
+		string op = "add";
+		$$ = (char *)op.c_str();
+	}
+	| MINUS
+	{
+		string op = "sub";
+		$$ = (char *)op.c_str();
+	}
+	;
+mulop: MULT
+	{
+		string op = "mul";
+		$$ = (char *)op.c_str();
+	}
+	| DIV
+	{
+		string op = "div";
+		$$ = (char *)op.c_str();
+	}
+	;
+
+if_stmt: IF 
+	{
+		// Create a new scope for the if statement
+		lc.createLabel();
+		st.createScope();
+	}
+	OB cond CB decl 
+	{
+		// Generate sun assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			fprintf(yyout, "push\n");
+		}
+	}
+	stmt_list 
+	{
+		// Exit the if statement scope
+		st.exitScope();
+
+		// Generate sun assembly code for jump to end of if statement
+		fprintf(yyout, "jmp end%d\n", lc.getCurrentLabel());
+
+		// Generate sun assembly code for label
+		fprintf(yyout, "label false%d\n", lc.getCurrentLabel());
+	}
+	else_part
+	{
+		// Generate sun assembly code for label
+		fprintf(yyout, "label end%d\n", lc.getCurrentLabel());
+		lc.exitLabel();
+	}
+	ENDIF
+	;
+else_part: ELSE 
+	{
+		// Create a new scope for the else statement
+		st.createScope();
+	}
+	decl 
+	{
+		// Generate sun assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			fprintf(yyout, "push\n");
+		}
+	}
+	stmt_list
+	{
+		// Exit the else statement scope
+		st.exitScope();
+	}
+	| %empty
+	;
+cond: expr compop expr
+	{
+		
+		// Generate sun assembly code for comparison
+		string type;
+		if ($1->type == "INT" && $3->type == "INT") {
+			type = "i";
+		}
+		else {
+			type = "r";
+		}
+		fprintf(yyout, "cmp%s %s %s\n", type.c_str(), $1->value.c_str(), $3->value.c_str());
+
+		// Generate sun assembly code for branching
+		if (compop == "lt") {
+			fprintf(yyout, "jge false%d\n", lc.getCurrentLabel());
+		}
+		else if (compop == "gt") {
+			fprintf(yyout, "jle false%d\n", lc.getCurrentLabel());
+		}
+		else if (compop == "eq") {
+			fprintf(yyout, "jne false%d\n", lc.getCurrentLabel());
+		}
+		else if (compop == "neq") {
+			fprintf(yyout, "jeq false%d\n", lc.getCurrentLabel());
+		}
+		else if (compop == "leq") {
+			fprintf(yyout, "jgt false%d\n", lc.getCurrentLabel());
+		}
+		else if (compop == "geq") {
+			fprintf(yyout, "jlt false%d\n", lc.getCurrentLabel());
+		}
+	}
+	;
+compop: LT
+	{
+		compop = "lt";
+	}
+	| GT
+	{
+		compop = "gt";
+	}
+	| EQ
+	{
+		compop = "eq";
+	}
+	| NEQ
+	{
+		compop = "neq";
+	}
+	| LEQ
+	{
+		compop = "leq";
+	}
+	| GEQ
+	{
+		compop = "geq";
+	}
+	;
+
+while_stmt: WHILE 
+	{
+		// Create a new scope for the while statement
+		lc.createLoopLabel();
+		st.createScope();
+
+		// Generate sun assembly code for label
+		fprintf(yyout, "label start%d\n", lc.getCurrentLabel());
+	}
+	OB cond CB decl 
+	{
+		// Generate sun assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			fprintf(yyout, "push\n");
+		}
+	}
+	aug_stmt_list 
+	{
+		// Exit the while statement scope
+		st.exitScope();
+
+		// Generate sun assembly code for jump to start of while statement
+		fprintf(yyout, "jmp start%d\n", lc.getCurrentLabel());
+
+		// Generate sun assembly code for label
+		fprintf(yyout, "label false%d\n", lc.getCurrentLabel());
+
+		lc.exitLoopLabel();
+	}
+	ENDWHILE
+	;
+aug_stmt_list: aug_stmt aug_stmt_list
+	| %empty
+	;
+aug_stmt: base_stmt
+	| aug_if_stmt
+	| while_stmt
+	| CONTINUE 
+	{
+		// Generate sun assembly code for jump to start of while statement
+		fprintf(yyout, "jmp start%d\n", lc.getCurrentLoopLabel());
+	}
+	COLON
+	| BREAK 
+	{
+		// Generate sun assembly code for jump to end of while statement
+		fprintf(yyout, "jmp false%d\n", lc.getCurrentLoopLabel());
+	}
+	COLON
+	;
+
+aug_if_stmt: IF 
+	{
+		// Create a new scope for the if statement
+		lc.createLabel();
+		st.createScope();
+	}
+	OB cond CB decl 
+	{
+		// Generate sun assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			fprintf(yyout, "push\n");
+		}
+	}
+	aug_stmt_list 
+	{
+		// Exit the if statement scope
+		st.exitScope();
+
+		// Generate sun assembly code for jump to end of if statement
+		fprintf(yyout, "jmp end%d\n", lc.getCurrentLabel());
+
+		// Generate sun assembly code for label
+		fprintf(yyout, "label false%d\n", lc.getCurrentLabel());
+	}
+	aug_else_part
+	{
+		// Generate sun assembly code for label
+		fprintf(yyout, "label end%d\n", lc.getCurrentLabel());
+		lc.exitLabel();
+	} 
+	ENDIF
+	;
+
+aug_else_part: ELSE 
+	{
+		// Create a new scope for the else statement
+		st.createScope();
+	}
+	decl 
+	{
+		// Generate sun assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			fprintf(yyout, "push\n");
+		}
+	}
+	aug_stmt_list
+	{
+		// Exit the else statement scope
+		st.exitScope();
+	}
+	| %empty
+	;
+
+%%

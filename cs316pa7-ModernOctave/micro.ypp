@@ -1,0 +1,1335 @@
+%{
+	#define DEBUG_LIVENESS 0
+	#define DEBUG_NUM_LIVE 0
+	#define DEBUG_ALLOCATION 0
+
+	#define NUMREGS 4
+
+	#define NONE -1
+	#define TEMP 0
+	#define NOTTEMP 1
+
+	#include <iostream>
+	#include <set>
+	#include <list>
+	#include <stack>
+	#include <string>
+	#include <unordered_map>
+
+
+	using namespace std;
+
+	extern FILE* yyin;
+	extern FILE* yyout;
+
+	int yylex();
+	void yyerror(const char* msg);
+	
+	struct Entry {
+		string name;
+		string type;
+		string value;
+		string line;
+	};
+
+	struct Value {
+		string type;
+		string value;
+	};
+
+	struct ArithNode {
+		string op;
+		string type;
+		string value;
+	};
+
+	int temp = 0;
+
+	class Program {
+		struct ProgramLine {
+			string op;
+			int type1;
+			string arg1;
+			int type2;
+			string arg2;
+		};
+
+		list<set<string>> liveRegisters;
+		list<set<string>> usedRegisters;
+		list<struct ProgramLine> program;
+		string pregs[NUMREGS];
+		stack<string> frameStack;
+
+		public:
+		void addLine(string op) {
+			struct ProgramLine newLine;
+			newLine.op = op;
+			newLine.type1 = NONE;
+			newLine.type2 = NONE;
+			program.push_back(newLine);
+		}
+
+		void addLine(string op, int type1, string arg1) {
+			struct ProgramLine newLine;
+			newLine.op = op;
+			newLine.type1 = type1;
+			newLine.arg1 = arg1;
+			newLine.type2 = NONE;
+			program.push_back(newLine);
+		}
+
+		void insertLine(list<struct ProgramLine>::iterator it, string op, int type1, string arg1) {
+			struct ProgramLine newLine;
+			newLine.op = op;
+			newLine.type1 = type1;
+			newLine.arg1 = arg1;
+			newLine.type2 = NONE;
+			program.insert(it, newLine);
+		}
+
+		void addLine(string op, int type1, string arg1, int type2, string arg2) {
+			struct ProgramLine newLine;
+			newLine.op = op;
+			newLine.type1 = type1;
+			newLine.arg1 = arg1;
+			newLine.type2 = type2;
+			newLine.arg2 = arg2;
+			program.push_back(newLine);
+		}
+
+		void insertLine(list<struct ProgramLine>::iterator it, string op, int type1, string arg1, int type2, string arg2) {
+			struct ProgramLine newLine;
+			newLine.op = op;
+			newLine.type1 = type1;
+			newLine.arg1 = arg1;
+			newLine.type2 = type2;
+			newLine.arg2 = arg2;
+			program.insert(it, newLine);
+		}
+
+		void writeProgram() {
+			for (list<struct ProgramLine>::iterator it = program.begin(); it != program.end(); it++) {
+				fprintf(yyout, "%s", it->op.c_str());
+				if (it->type1 != NONE) {
+					fprintf(yyout, " %s", it->arg1.c_str());
+				}
+				if (it->type2 != NONE) {
+					fprintf(yyout, " %s", it->arg2.c_str());
+				}
+				fprintf(yyout, "\n");
+			}
+		}
+
+		void calculateLiveness() {
+			// No registers are live at the end of the program
+			liveRegisters.push_front(set<string>());
+			// Iterate through the program backwards
+			for (auto it = program.rbegin(); it != program.rend(); it++) {
+				// Create a copy of previous live registers
+				set<string> newLiveRegisters = liveRegisters.front();
+				set<string> newUsedRegisters;
+				// Remove any registers that are overwritten
+				if (it->op == "move" || it->op == "addi" || it->op == "addr" || it->op == "subi" || it->op == "subr" || it->op == "muli" || it->op == "mulr" || it->op == "divi" || it->op == "divr" || (it->op == "sys" && it->arg1 == "readi") || (it->op == "sys" && it->arg1 == "readr")) {
+					newLiveRegisters.erase(it->arg2);
+				}
+				if (it->op == "pop") {
+					newLiveRegisters.erase(it->arg1);
+				}
+				// Add any registers that are used
+				if (it->op == "move" || it->op == "addi" || it->op == "addr" || it->op == "subi" || it->op == "subr" || it->op == "muli" || it->op == "mulr" || it->op == "divi" || it->op == "divr" || it->op == "cmpi" || it->op == "cmpr" || it->op == "push") {
+					if (it->type1 == TEMP) {
+						newLiveRegisters.insert(it->arg1);
+						newUsedRegisters.insert(it->arg1);
+					}
+				}
+				if (it->op == "addi" || it->op == "addr" || it->op == "subi" || it->op == "subr" || it->op == "muli" || it->op == "mulr" || it->op == "divi" || it->op == "divr" || it->op == "cmpi" || it->op == "cmpr" || (it->op == "sys" && it->arg1 == "writei") || (it->op == "sys" && it->arg1 == "writer")) {
+					if (it->type2 == TEMP) {
+						newLiveRegisters.insert(it->arg2);
+						newUsedRegisters.insert(it->arg2);
+					}
+				}
+				// Add the new set of live registers to the front of the list
+				liveRegisters.push_front(newLiveRegisters);
+				usedRegisters.push_front(newUsedRegisters);
+			}
+			// Remove the first element, which should be empty
+			liveRegisters.pop_front();
+
+			# if DEBUG_LIVENESS
+				// Print the live registers
+				int i = 0;
+				for (list<set<string>>::iterator it = liveRegisters.begin(); it != liveRegisters.end(); it++) {
+					printf("Line %d: ", i+1);
+					for (set<string>::iterator it2 = it->begin(); it2 != it->end(); it2++) {
+						printf("%s ", it2->c_str());
+					}
+					printf("\n");
+					i++;
+				}
+			# endif
+
+			# if DEBUG_NUM_LIVE
+				// Print the max number of live registers at any point
+				int max = 0;
+				for (list<set<string>>::iterator it = liveRegisters.begin(); it != liveRegisters.end(); it++) {
+					if (it->size() > max) {
+						max = it->size();
+					}
+				}
+				printf("Max number of live registers: %d\n", max);
+			# endif
+		}
+
+		int findInFrameStack(const char *temp) {
+			int index = frameStack.size();
+			stack<string> tempStack = frameStack;
+			while (tempStack.top() != temp) {
+				tempStack.pop();
+				index--;
+			}
+			return index;
+		}
+
+		int convert(const char *temp, list<ProgramLine>::iterator programIt, bool isActive) {
+			int newReg;
+			
+			// If the temp is already in a register, return the register number
+			for (int i = 0; i < 4; i++) {
+				if (pregs[i] == temp) {
+					return i;
+				}
+			}
+			
+			// If there is a free register then return it
+			for (int i = 0; i < 4; i++) {
+				if (pregs[i] == "_") {
+					pregs[i] = temp;
+					// If the temp is active, then load it from the frame stack
+					if (isActive) {
+						insertLine(programIt, "move", NOTTEMP, "$-" + to_string(findInFrameStack(temp)), NOTTEMP, "r"+to_string(i));
+					}
+					return i;
+				}
+			}
+
+			// If there is no free register, then spill the register that is used the furthest in the future
+			// Find the register that is used the furthest in the future
+			int max = -1;
+			int maxIndex = -1;
+			for (int i = 0; i < 4; i++) {
+				string temp = pregs[i];
+				int line = 0;
+				for (auto it = usedRegisters.begin(); it != usedRegisters.end(); it++) {
+					if (it->find(temp) != it->end()) {
+						if (line > max) {
+							max = line;
+							maxIndex = i;
+						}
+					}
+					line++;
+				}
+			}
+			// Spill it
+			insertLine(programIt, "push", NOTTEMP, "r"+to_string(maxIndex));
+			frameStack.push(string(pregs[maxIndex]));
+
+			// Update the register
+			pregs[maxIndex] = temp;
+
+			// If the temp is already active, then move it to the new register
+			if (isActive) {
+				// Move it to the new register
+				insertLine(programIt, "move", NOTTEMP, "$-"+to_string(findInFrameStack(temp)), NOTTEMP, "r"+to_string(maxIndex));
+			}
+
+			return maxIndex;
+		}
+
+		void runRegAlloc() {
+			// Initialize the registers to be free
+			for (int i = 0; i < NUMREGS; i++) {
+				pregs[i] = "_";
+			}
+			// Iterate through the program
+			int line = 1;
+			auto curLiveRegisters = liveRegisters.begin();
+			auto prevLiveRegisters = liveRegisters.end();
+			for (auto it = program.begin(); it != program.end(); it++) {
+				// If link then update the frame stack
+				if (it->op == "link") {
+					// Reset the frame stack
+					while (!frameStack.empty()) {
+						frameStack.pop();
+					}
+					for (int i = 0; i < stoi(it->arg1); i++) {
+						frameStack.push("local");
+					}
+				}
+
+				// If push then update the frame stack
+				if (it->op == "push") {
+					frameStack.push("local");
+				}
+
+				// If unlnk then empty the frame stack
+				if (it->op == "unlnk") {
+					while (!frameStack.empty()) {
+						frameStack.pop();
+					}
+				}
+
+				// For other commands
+				// Convert registers
+				if (it->type1 == TEMP) {
+					bool isActive = (prevLiveRegisters->find(it->arg1) != prevLiveRegisters->end());
+					it->arg1 = "r" + to_string(convert(it->arg1.c_str(), it, isActive));
+				}
+				if (it->type2 == TEMP) {
+					bool isActive = (prevLiveRegisters->find(it->arg2) != prevLiveRegisters->end());
+					it->arg2 = "r" + to_string(convert(it->arg2.c_str(), it, isActive));
+				}
+				// Free any registers that are no longer live
+				for (int i = 0; i < NUMREGS; i++) {
+					if (pregs[i] != "_" && curLiveRegisters->find(pregs[i]) == curLiveRegisters->end()) {
+						pregs[i] = "_";
+					}
+				}
+
+				# if DEBUG_ALLOCATION
+					printf("Line %d", line++);
+					for (int i = 0; i < NUMREGS; i++) {
+						printf(" %s", pregs[i].c_str());
+					}
+					printf("\n");
+				# endif
+
+				prevLiveRegisters = curLiveRegisters;
+				curLiveRegisters++;
+			}
+		}
+	};
+
+	class LabelControl {
+		int numLabels = 0;
+		stack<int> labelStack;
+		stack<int> loopStack;
+
+		public:
+		
+		int getCurrentLabel() {
+			return labelStack.top();
+		}
+
+		int getCurrentLoopLabel() {
+			return loopStack.top();
+		}
+
+		void createLabel() {
+			labelStack.push(numLabels);
+			numLabels++;
+		}
+
+		void createLoopLabel() {
+			labelStack.push(numLabels);
+			loopStack.push(numLabels);
+			numLabels++;
+		}
+
+		void exitLabel() {
+			labelStack.pop();
+		}
+
+		void exitLoopLabel() {
+			labelStack.pop();
+			loopStack.pop();
+		}
+	};
+
+	class SymbolTable {
+		unordered_map<string, unordered_map<string, struct Entry> *> entryTables;
+		unordered_map<string, list<string> *> scopeVars;
+		stack<string> scopeStack;
+		list<string> scopeList;
+		int numBlocks = 1;
+
+		public:
+
+		void createScope() {
+			string scopeName = "BLOCK" + to_string(numBlocks);
+			unordered_map<string, struct Entry> *newScope = new unordered_map<string, struct Entry>();
+			entryTables[scopeName] = newScope;
+			list<string> *newScopeVars = new list<string>();
+			scopeVars[scopeName] = newScopeVars;
+			scopeStack.push(scopeName);
+			scopeList.push_back(scopeName);
+			numBlocks++;
+		}
+
+		void createScope(string scopeName) {
+			unordered_map<string, struct Entry> *newScope = new unordered_map<string, struct Entry>();
+			entryTables[scopeName] = newScope;
+			list<string> *newScopeVars = new list<string>();
+			scopeVars[scopeName] = newScopeVars;
+			scopeStack.push(scopeName);
+			scopeList.push_back(scopeName);
+		}
+
+		void exitScope() {
+			scopeStack.pop();
+		}
+
+		void checkIfDeclared(string varName) {
+			unordered_map<string, struct Entry> *currentScope = entryTables[scopeStack.top()];
+			if (currentScope->find(varName) != currentScope->end()) {
+				// string msg = "DECLARATION ERROR " + varName + " (previous declaration was at line "+to_string(currentScope->)+")\n";
+				string msg = "DECLARATION ERROR " + varName + " (previous declaration was at line "+currentScope->at(varName).line+")\n";
+				yyerror(msg.c_str());
+			}
+		}
+
+		// Add an entry to the symbol table
+		void addEntry(string varName, string varType, int line) {
+			unordered_map<string, struct Entry> *currentScope = entryTables[scopeStack.top()];
+			struct Entry newEntry;
+			newEntry.type = varType;
+			newEntry.line = to_string(line);
+			newEntry.name = varName;
+			(*currentScope)[varName] = newEntry;
+			scopeVars[scopeStack.top()]->push_back(varName);
+		}
+
+		// Add an entry to the symbol table with a value
+		void addEntry(string varName, string varType, int line, string varValue) {
+			unordered_map<string, struct Entry> *currentScope = entryTables[scopeStack.top()];
+			struct Entry newEntry;
+			newEntry.type = varType;
+			newEntry.line = to_string(line);
+			newEntry.value = varValue;
+			newEntry.name = varName;
+			(*currentScope)[varName] = newEntry;
+			scopeVars[scopeStack.top()]->push_back(varName);
+		}
+		
+		// Search for the variable in the current scope and all the parent scopes and return the entry
+		struct Entry *getEntry(string varName) {
+			stack<string> tempStack = scopeStack;
+			while (!tempStack.empty()) {
+				unordered_map<string, struct Entry> *currentScope = entryTables[tempStack.top()];
+				if (currentScope->find(varName) != currentScope->end()) {
+					return &currentScope->at(varName);
+				}
+				tempStack.pop();
+			}
+			yyerror("ERROR (getEntry): Variable not found in symbol table\n");
+			return NULL;
+		}
+
+		const char *getCurrentScope() {
+			return scopeStack.top().c_str();
+		}
+
+		const char *findWhichScope(string varName) {
+			stack<string> tempStack = scopeStack;
+			while (!tempStack.empty()) {
+				unordered_map<string, struct Entry> *currentScope = entryTables[tempStack.top()];
+				if (currentScope->find(varName) != currentScope->end()) {
+					return tempStack.top().c_str();
+				}
+				tempStack.pop();
+			}
+			yyerror("ERROR (findWhichScope): Variable not found in symbol table\n");
+			return NULL;
+		}
+
+		bool isFromGlobal(string varName) {
+			stack<string> tempStack = scopeStack;
+			while (!tempStack.empty()) {
+				unordered_map<string, struct Entry> *currentScope = entryTables[tempStack.top()];
+				if (currentScope->find(varName) != currentScope->end()) {
+					if (tempStack.top() == "GLOBAL") {
+						return true;
+					}
+					else {
+						return false;
+					}
+				}
+				tempStack.pop();
+			}
+			yyerror("ERROR (isFromGlobal): Variable not found in symbol table\n");
+			return NULL;
+		}
+
+		bool isGlobal() {
+			return (scopeStack.top() == "GLOBAL");
+		}
+
+		stack<string> getSearchStack() {
+			stack<string> tempStack = scopeStack;
+			stack<string> searchStack;
+			searchStack.push(tempStack.top());
+			tempStack.pop();
+			while (string("BLOCK").compare(searchStack.top().substr(0, 5)) == 0) {
+				searchStack.push(tempStack.top());
+				tempStack.pop();
+			}
+			return searchStack;
+		}
+
+		int getNumEntries() {
+			stack<string> searchStack = getSearchStack();
+			int num = 0;
+			while (!searchStack.empty()) {
+				num += entryTables[searchStack.top()]->size();
+				searchStack.pop();
+			}
+			return num;
+		}
+
+		int getNumLocalEntries() {
+			return entryTables[scopeStack.top()]->size();
+		}
+
+		int getVarNum(string varName) {
+			stack<string> searchStack = getSearchStack();
+			int num = 0;
+			while (!searchStack.empty()) {
+				for (auto it = scopeVars[searchStack.top()]->begin(); it != scopeVars[searchStack.top()]->end(); it++) {
+					if (*it == varName) {
+						return num;
+					}
+					num++;
+				}
+				searchStack.pop();
+			}
+			yyerror("ERROR (getVarNum): Variable not found in symbol table\n");
+			return -1;
+		}
+
+		// Print the symbol table
+		void printSymbolTables() {
+			bool first = true;
+			fprintf(yyout, "\n------------------------------------\n");
+			for (string scopeName : scopeList) {
+				if (first) {
+					first = false;
+				}
+				else {
+					fprintf(yyout, "\n");
+				}
+				fprintf(yyout, "Symbol table %s\n", scopeName.c_str());
+				unordered_map<string, struct Entry> *scope = entryTables[scopeName];
+				for (auto it = scopeVars[scopeName]->begin(); it != scopeVars[scopeName]->end(); it++) {
+					if (scope->at(*it).value != "") {
+						fprintf(yyout, "name %s type %s value \"%s\"\n", it->c_str(), scope->at(*it).type.c_str(), scope->at(*it).value.c_str());
+					}
+					else {
+						fprintf(yyout, "name %s type %s\n", it->c_str(), scope->at(*it).type.c_str());
+					}
+				}
+			}
+			fprintf(yyout, "\n------------------------------------\n\n");
+		}
+	}; 
+
+	Program prog;
+	SymbolTable st;
+	LabelControl lc;
+	stack<string> funcStack;
+	stack<int> numParamsStack;
+	stack<int> numArgsStack;
+	string type, IOOp, op, compop;
+	bool isGlobal = false;
+
+	int getOffset(string varName) {
+		int offset;
+		if (st.getVarNum(varName) >= numParamsStack.top()) {
+			// Local variable
+			offset = - 1 - (st.getVarNum(varName) - numParamsStack.top());
+		}
+		else {
+			// Parameter
+			offset = 2 + (st.getVarNum(varName));
+		}
+		return offset;
+	}
+%}
+
+%union {
+	std::pair<std::string, int> *strLine;
+	struct Entry *entry;
+	char *str;
+	struct Value *value;
+	struct ArithNode *arithNode;
+}
+
+%token PROGRAM _BEGIN END FUNCTION READ WRITE IF ELSE ENDIF WHILE ENDWHILE CONTINUE BREAK RETURN INT VOID STRING FLOAT
+%token DEF ADD MINUS MULT DIV EQ NEQ LT GT OB CB COLON COMMA LEQ GEQ
+%token IDENTIFIER INTLITERAL FLOATLITERAL STRINGLITERAL
+
+%type <strLine> IDENTIFIER id STRINGLITERAL str INTLITERAL FLOATLITERAL
+%type <value> primary expr postfix_expr factor call_expr
+%type <arithNode> factor_prefix expr_prefix
+%type <str> addop mulop
+
+%%
+
+program: PROGRAM id _BEGIN
+	{
+		// Create the global scope
+		st.createScope("GLOBAL");
+	}
+	pgm_body END
+	{
+		// Exit the global scope
+		st.exitScope();
+
+		// Write the program to the output file
+		prog.calculateLiveness();
+		prog.runRegAlloc();
+		prog.writeProgram();
+	}
+	;
+id: IDENTIFIER
+	{
+		$$ = $1;
+	}
+	;
+pgm_body: decl 
+	{
+		// Generate assembly code for pushing space for return value
+		// fprintf(yyout, "push\n");
+		prog.addLine("push");
+
+		// Generate assembly code for spilling registers
+		for (int i = 0; i < NUMREGS; i++) {
+			// fprintf(yyout, "push r%d\n", i);
+			prog.addLine("push", NOTTEMP, "r" + to_string(i));
+		}
+
+		// Generate assembly code for calling function
+		// fprintf(yyout, "jsr main\n");
+		prog.addLine("jsr", NOTTEMP, "main");
+
+		// Generate assembly code for system halt
+		// fprintf(yyout, "sys halt\n");
+		prog.addLine("sys", NOTTEMP, "halt");
+	}
+	func_declarations
+	;
+decl: string_decl decl
+	| var_decl decl
+	| %empty
+	;
+
+string_decl: STRING id DEF str COLON
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($2->first);
+		// Add the variable to the current scope
+		// Remove the quotes from the string
+		$4->first = $4->first.substr(1, $4->first.length() - 2);
+		st.addEntry($2->first, "STRING", $2->second, $4->first);
+
+		// Generate assembly code
+		// fprintf(yyout, "str %s-%s \"%s\"\n", st.getCurrentScope(), $2->first.c_str(), $4->first.c_str());
+		prog.addLine("str", NOTTEMP, string(st.getCurrentScope()) + "-" + $2->first, NOTTEMP, "\""+$4->first+"\"");
+	}
+	;
+str: STRINGLITERAL
+	;
+
+var_decl: var_type id_list_decl COLON
+	;
+var_type: FLOAT
+	{
+		type = "FLOAT";
+	}
+	| INT
+	{
+		type = "INT";
+	}
+	;
+any_type: var_type 
+	| VOID
+	;
+id_list_decl: id
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($1->first);
+		// Add the variable to the current scope
+		st.addEntry($1->first, type, $1->second);
+
+		if (st.isGlobal()) {
+			// Generate assembly code
+			// fprintf(yyout, "var %s\n", $1->first.c_str());
+			prog.addLine("var", NOTTEMP, $1->first);
+		}
+	}
+	id_tail_decl
+id_tail_decl: COMMA id
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($2->first);
+		// Add the variable to the current scope
+		st.addEntry($2->first, type, $2->second);
+
+		if (st.isGlobal()) {
+			// Generate assembly code
+			// fprintf(yyout, "var %s\n", $2->first.c_str());
+			prog.addLine("var", NOTTEMP, $2->first);
+		}
+	} 
+	id_tail_decl
+	| %empty
+	;
+id_list: id 
+	{
+		string loc;
+		int type;
+		if (st.isFromGlobal($1->first)) {
+			loc = $1->first;
+		}
+		else {
+			loc = "$" + to_string(getOffset($1->first));
+		}
+		// Generate assembly code
+		struct Entry *entry = st.getEntry($1->first);
+		if (entry->type == "INT") {
+			// fprintf(yyout, "sys %si %s\n", IOOp.c_str(), loc.c_str());
+			prog.addLine("sys", NOTTEMP, IOOp+"i", NOTTEMP, loc);
+		}
+		else if (entry->type == "FLOAT") {
+			// fprintf(yyout, "sys %sr %s\n", IOOp.c_str(), loc.c_str());
+			prog.addLine("sys", NOTTEMP, IOOp+"r", NOTTEMP, loc);
+		}
+		else if (entry->type == "STRING") {
+			// fprintf(yyout, "sys %ss %s-%s\n", IOOp.c_str(), st.findWhichScope($1->first), $1->first.c_str());
+			prog.addLine("sys", NOTTEMP, IOOp+"s", NOTTEMP, string(st.findWhichScope($1->first)) + "-" + $1->first);
+		}
+	}
+	id_tail
+id_tail: COMMA id 
+	{
+		string loc;
+		int type;
+		if (st.isFromGlobal($2->first)) {
+			loc = $2->first;
+		}
+		else {
+			loc = "$" + to_string(getOffset($2->first));
+		}
+		// Generate assembly code
+		struct Entry *entry = st.getEntry($2->first);
+		if (entry->type == "INT") {
+			// fprintf(yyout, "sys %si %s\n", IOOp.c_str(), loc.c_str());
+			prog.addLine("sys", NOTTEMP, IOOp+"i", NOTTEMP, loc);
+		}
+		else if (entry->type == "FLOAT") {
+			// fprintf(yyout, "sys %sr %s\n", IOOp.c_str(), loc.c_str());
+			prog.addLine("sys", NOTTEMP, IOOp+"r", NOTTEMP, loc);
+		}
+		else if (entry->type == "STRING") {
+			// fprintf(yyout, "sys %ss %s-%s\n", IOOp.c_str(), st.findWhichScope($2->first), $2->first.c_str());
+			prog.addLine("sys", NOTTEMP, IOOp+"s", NOTTEMP, string(st.findWhichScope($2->first)) + "-" + $2->first);
+		}
+	}
+	id_tail
+	| %empty
+	;
+
+param_decl_list: param_decl param_decl_tail
+	| %empty
+	;
+param_decl: var_type id
+	{
+		// Check if the variable is already declared in the current scope
+		st.checkIfDeclared($2->first);
+		// Add the variable to the current scope
+		st.addEntry($2->first, type, $2->second);
+	}
+	;
+param_decl_tail: COMMA param_decl param_decl_tail
+	| %empty
+	;
+
+func_declarations: func_decl func_declarations
+	| %empty
+	;
+func_decl: FUNCTION any_type id
+	{
+		// Create a new scope for the function
+		st.createScope($3->first);
+
+		// Generate assembly code for function label
+		// fprintf(yyout, "label %s\n", $3->first.c_str());
+		prog.addLine("label", NOTTEMP, $3->first);
+	}
+	OB param_decl_list CB 
+	{
+		numParamsStack.push(st.getNumEntries());
+	}
+	_BEGIN func_body END
+	{
+		numParamsStack.pop();
+		// Exit the function scope
+		st.exitScope();
+	}
+	;
+func_body: decl 
+	{
+		// Generate assembly code for allocating space for local variables
+		// fprintf(yyout, "link %d\n", st.getNumEntries()-numParamsStack.top());
+		prog.addLine("link", NOTTEMP, to_string(st.getNumEntries()-numParamsStack.top()));
+	}
+	stmt_list
+	;
+
+stmt_list: stmt stmt_list 
+	| %empty
+	;
+stmt: base_stmt 
+	| if_stmt
+	| while_stmt
+	;
+base_stmt: assign_stmt 
+	| read_stmt 
+	| write_stmt 
+	| return_stmt
+	;
+
+assign_stmt: assign_expr COLON
+	;
+assign_expr: id DEF expr
+	{
+		if (st.isFromGlobal($1->first)) {
+			// Generate assembly code
+			// fprintf(yyout, "move %s %s\n", $3->value.c_str(), $1->first.c_str());
+			prog.addLine("move", TEMP, $3->value, NOTTEMP, $1->first);
+		}
+		else {
+			// Generate assembly code
+			// fprintf(yyout, "move %s $%d\n", $3->value.c_str(), getOffset($1->first));
+			prog.addLine("move", TEMP, $3->value, NOTTEMP, "$"+to_string(getOffset($1->first)));
+		}
+	}
+	;
+read_stmt: READ 
+	{
+		IOOp = "read";
+	}
+	OB id_list CB COLON
+	;
+write_stmt: WRITE 
+	{
+		IOOp = "write";
+	}
+	OB id_list CB COLON
+	;
+return_stmt: RETURN expr COLON
+	{
+		// Generate assembly code for returning value from function
+		// fprintf(yyout, "move %s $%d\n", $2->value.c_str(), numParamsStack.top()+2);
+		prog.addLine("move", TEMP, $2->value, NOTTEMP, "$"+to_string(2+numParamsStack.top()+NUMREGS));
+
+		// Generate assembly code for unallocating space for local variables
+		// fprintf(yyout, "unlnk\n");
+		prog.addLine("unlnk");
+
+		// Generate assembly code for returning
+		// fprintf(yyout, "ret\n");
+		prog.addLine("ret");
+	}
+	;
+
+expr: expr_prefix factor
+	{
+		// Create value
+		$$ = new Value();
+
+		if ($1 != NULL) {
+			// Generate assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			// fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			prog.addLine($1->op+type, TEMP, $2->value, TEMP, $1->value);
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+	}
+	;
+expr_prefix: expr_prefix factor addop
+	{
+		// Create arithnode
+		$$ = new ArithNode();
+		$$->op = $3;
+
+		if ($1 != NULL) {
+			// Generate assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			// fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			prog.addLine($1->op+type, TEMP, $2->value, TEMP, $1->value);
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+
+	}
+	| %empty
+	{
+		$$ = NULL;
+	}
+	;
+factor: factor_prefix postfix_expr
+	{
+		// Create value
+		$$ = new Value();
+
+		if ($1 != NULL) {
+			// Generate assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			// fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			prog.addLine($1->op+type, TEMP, $2->value, TEMP, $1->value);
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+	}
+	;
+factor_prefix: factor_prefix postfix_expr mulop
+	{
+		// Create arithnode
+		$$ = new ArithNode();
+		$$->op = $3;
+
+		if ($1 != NULL) {
+			// Generate assembly code for last operation
+			string type;
+			if ($1->type == "INT" && $2->type == "INT") {
+				type = "i";
+				$$->type = "INT";
+			}
+			else {
+				type = "r";
+				$$->type = "FLOAT";
+			}
+			// fprintf(yyout, "%s%s %s %s\n", $1->op.c_str(), type.c_str(), $2->value.c_str(), $1->value.c_str());
+			prog.addLine($1->op+type, TEMP, $2->value, TEMP, $1->value);
+			$$->value = $1->value;
+		}
+		else {
+			$$->type = $2->type;
+			$$->value = $2->value;
+		}
+	}
+	| %empty
+	{
+		$$ = NULL;
+	}
+	;
+postfix_expr: primary
+	{
+		$$ = $1;
+	}
+	| call_expr
+	{
+		
+	}
+	;
+call_expr: id 
+	{
+		funcStack.push($1->first);
+		numArgsStack.push(0);
+		// Generate assembly code for pushing space for return value
+		// fprintf(yyout, "push\n");
+		prog.addLine("push");
+		// Generate assembly code for spilling registers
+		for (int i = 0; i < NUMREGS; i++) {
+			prog.addLine("push", NOTTEMP, "r"+to_string(i));
+		}
+	}
+	OB expr_list CB
+	{
+		// Generate assembly code for calling function
+		// fprintf(yyout, "jsr %s\n", funcStack.top().c_str());	
+		prog.addLine("jsr", NOTTEMP, funcStack.top());
+
+		// Generate assembly code for popping arguments
+		for (int i = 0; i < numArgsStack.top(); i++) {
+			// fprintf(yyout, "pop\n");
+			prog.addLine("pop");
+		}
+
+		// Generate assembly code for restoring registers
+		for (int i = 0; i < NUMREGS; i++) {
+			prog.addLine("pop", NOTTEMP, "r"+to_string(NUMREGS-1-i));
+		}
+
+		// Generate assembly code for popping return value
+		// fprintf(yyout, "pop r%d\n", temp);
+		prog.addLine("pop", TEMP, "t"+to_string(temp));
+
+		$$ = new Value();
+		$$->type = "FLOAT";
+		$$->value = "t" + to_string(temp);
+		temp++;
+
+		numArgsStack.pop();
+		funcStack.pop();
+	}
+	;
+expr_list: expr expr_list_tail
+	{
+		numArgsStack.top()++;
+		// Generate assembly code for pushing argument
+		// fprintf(yyout, "push %s\n", $1->value.c_str());
+		prog.addLine("push", TEMP, $1->value);
+	}
+	| %empty
+	;
+expr_list_tail: COMMA expr 
+	{
+		numArgsStack.top()++;
+		// Generate assembly code for pushing argument
+		// fprintf(yyout, "push %s\n", $2->value.c_str());
+		prog.addLine("push", TEMP, $2->value);
+	}
+	expr_list_tail
+	| %empty
+	;
+primary: OB expr CB
+	{
+		$$ = $2;
+	}
+	| id
+	{
+		// Generate assembly code for moving value into register
+		if (st.isFromGlobal($1->first)) {
+			// fprintf(yyout, "move %s r%d\n", $1->first.c_str(), temp);
+			prog.addLine("move", NOTTEMP, $1->first, TEMP, "t"+to_string(temp));
+		}
+		else {
+			// fprintf(yyout, "move $%d r%d\n", getOffset($1->first), temp);
+			prog.addLine("move", NOTTEMP, "$"+to_string(getOffset($1->first)), TEMP, "t"+to_string(temp));
+		}
+
+		struct Entry *entry = st.getEntry($1->first);
+		$$ = new Value();
+		$$->type = entry->type;
+		$$->value = string("t") + to_string(temp);
+		temp++;
+	}
+	| INTLITERAL
+	{
+		// Generate assembly code for moving into register
+		// fprintf(yyout, "move %s r%d\n", $1->first.c_str(), temp);
+		prog.addLine("move", NOTTEMP, $1->first, TEMP, "t"+to_string(temp));
+
+		$$ = new Value();
+		$$->type = string("INT");
+		$$->value = string("t") + to_string(temp);
+		temp++;
+	}
+	| FLOATLITERAL
+	{
+		// Generate assembly code for moving into register
+		// fprintf(yyout, "move %s r%d\n", $1->first.c_str(), temp);
+		prog.addLine("move", NOTTEMP, $1->first, TEMP, "t"+to_string(temp));
+
+		$$ = new Value();
+		$$->type = string("FLOAT");
+		$$->value = string("t") + to_string(temp);
+		temp++;
+	}
+	;
+addop: ADD 
+	{
+		string op = "add";
+		$$ = (char *)op.c_str();
+	}
+	| MINUS
+	{
+		string op = "sub";
+		$$ = (char *)op.c_str();
+	}
+	;
+mulop: MULT
+	{
+		string op = "mul";
+		$$ = (char *)op.c_str();
+	}
+	| DIV
+	{
+		string op = "div";
+		$$ = (char *)op.c_str();
+	}
+	;
+
+if_stmt: IF 
+	{
+		// Create a new scope for the if statement
+		lc.createLabel();
+		st.createScope();
+	}
+	OB cond CB decl 
+	{
+		// Generate assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			// fprintf(yyout, "push\n");
+			prog.addLine("push");
+		}
+	}
+	stmt_list 
+	{
+		// Exit the if statement scope
+		st.exitScope();
+
+		// Generate assembly code for jump to end of if statement
+		// fprintf(yyout, "jmp end%d\n", lc.getCurrentLabel());
+		prog.addLine("jmp", NOTTEMP, "end"+to_string(lc.getCurrentLabel()));
+
+		// Generate assembly code for label
+		// fprintf(yyout, "label false%d\n", lc.getCurrentLabel());
+		prog.addLine("label", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+	}
+	else_part
+	{
+		// Generate assembly code for label
+		// fprintf(yyout, "label end%d\n", lc.getCurrentLabel());
+		prog.addLine("label", NOTTEMP, "end"+to_string(lc.getCurrentLabel()));
+		lc.exitLabel();
+	}
+	ENDIF
+	;
+else_part: ELSE 
+	{
+		// Create a new scope for the else statement
+		st.createScope();
+	}
+	decl 
+	{
+		// Generate assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			// fprintf(yyout, "push\n");
+			prog.addLine("push");
+		}
+	}
+	stmt_list
+	{
+		// Exit the else statement scope
+		st.exitScope();
+	}
+	| %empty
+	;
+cond: expr compop expr
+	{
+		
+		// Generate assembly code for comparison
+		string type;
+		if ($1->type == "INT" && $3->type == "INT") {
+			type = "i";
+		}
+		else {
+			type = "r";
+		}
+		// fprintf(yyout, "cmp%s %s %s\n", type.c_str(), $1->value.c_str(), $3->value.c_str());
+		prog.addLine("cmp"+type, TEMP, $1->value, TEMP, $3->value);
+
+		// Generate assembly code for branching
+		if (compop == "lt") {
+			// fprintf(yyout, "jge false%d\n", lc.getCurrentLabel());
+			prog.addLine("jge", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+		}
+		else if (compop == "gt") {
+			// fprintf(yyout, "jle false%d\n", lc.getCurrentLabel());
+			prog.addLine("jle", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+		}
+		else if (compop == "eq") {
+			// fprintf(yyout, "jne false%d\n", lc.getCurrentLabel());
+			prog.addLine("jne", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+		}
+		else if (compop == "neq") {
+			// fprintf(yyout, "jeq false%d\n", lc.getCurrentLabel());
+			prog.addLine("jeq", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+		}
+		else if (compop == "leq") {
+			// fprintf(yyout, "jgt false%d\n", lc.getCurrentLabel());
+			prog.addLine("jgt", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+		}
+		else if (compop == "geq") {
+			// fprintf(yyout, "jlt false%d\n", lc.getCurrentLabel());
+			prog.addLine("jlt", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+		}
+	}
+	;
+compop: LT
+	{
+		compop = "lt";
+	}
+	| GT
+	{
+		compop = "gt";
+	}
+	| EQ
+	{
+		compop = "eq";
+	}
+	| NEQ
+	{
+		compop = "neq";
+	}
+	| LEQ
+	{
+		compop = "leq";
+	}
+	| GEQ
+	{
+		compop = "geq";
+	}
+	;
+
+while_stmt: WHILE 
+	{
+		// Create a new scope for the while statement
+		lc.createLoopLabel();
+		st.createScope();
+
+		// Generate assembly code for label
+		// fprintf(yyout, "label start%d\n", lc.getCurrentLabel());
+		prog.addLine("label", NOTTEMP, "start"+to_string(lc.getCurrentLabel()));
+	}
+	OB cond CB decl 
+	{
+		// Generate assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			// fprintf(yyout, "push\n");
+			prog.addLine("push");
+		}
+	}
+	aug_stmt_list 
+	{
+		// Exit the while statement scope
+		st.exitScope();
+
+		// Generate assembly code for jump to start of while statement
+		// fprintf(yyout, "jmp start%d\n", lc.getCurrentLabel());
+		prog.addLine("jmp", NOTTEMP, "start"+to_string(lc.getCurrentLabel()));
+
+		// Generate assembly code for label
+		// fprintf(yyout, "label false%d\n", lc.getCurrentLabel());
+		prog.addLine("label", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+
+		lc.exitLoopLabel();
+	}
+	ENDWHILE
+	;
+aug_stmt_list: aug_stmt aug_stmt_list
+	| %empty
+	;
+aug_stmt: base_stmt
+	| aug_if_stmt
+	| while_stmt
+	| CONTINUE 
+	{
+		// Generate assembly code for jump to start of while statement
+		// fprintf(yyout, "jmp start%d\n", lc.getCurrentLoopLabel());
+		prog.addLine("jmp", NOTTEMP, "start"+to_string(lc.getCurrentLoopLabel()));
+	}
+	COLON
+	| BREAK 
+	{
+		// Generate assembly code for jump to end of while statement
+		// fprintf(yyout, "jmp false%d\n", lc.getCurrentLoopLabel());
+		prog.addLine("jmp", NOTTEMP, "false"+to_string(lc.getCurrentLoopLabel()));
+	}
+	COLON
+	;
+
+aug_if_stmt: IF 
+	{
+		// Create a new scope for the if statement
+		lc.createLabel();
+		st.createScope();
+	}
+	OB cond CB decl 
+	{
+		// Generate assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			// fprintf(yyout, "push\n");
+			prog.addLine("push");
+		}
+	}
+	aug_stmt_list 
+	{
+		// Exit the if statement scope
+		st.exitScope();
+
+		// Generate assembly code for jump to end of if statement
+		// fprintf(yyout, "jmp end%d\n", lc.getCurrentLabel());
+		prog.addLine("jmp", NOTTEMP, "end"+to_string(lc.getCurrentLabel()));
+
+		// Generate assembly code for label
+		// fprintf(yyout, "label false%d\n", lc.getCurrentLabel());
+		prog.addLine("label", NOTTEMP, "false"+to_string(lc.getCurrentLabel()));
+	}
+	aug_else_part
+	{
+		// Generate assembly code for label
+		// fprintf(yyout, "label end%d\n", lc.getCurrentLabel());
+		prog.addLine("label", NOTTEMP, "end"+to_string(lc.getCurrentLabel()));
+		lc.exitLabel();
+	} 
+	ENDIF
+	;
+
+aug_else_part: ELSE 
+	{
+		// Create a new scope for the else statement
+		st.createScope();
+	}
+	decl 
+	{
+		// Generate assembly code for creating space in stack
+		for (int i = 0; i < st.getNumLocalEntries(); i++) {
+			// fprintf(yyout, "push\n");
+			prog.addLine("push");
+		}
+	}
+	aug_stmt_list
+	{
+		// Exit the else statement scope
+		st.exitScope();
+	}
+	| %empty
+	;
+
+%%
